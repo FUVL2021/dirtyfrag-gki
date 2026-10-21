@@ -1,0 +1,59 @@
+# 内核模块构建
+#
+# 每个 GKI KMI 在对应的 DDK 镜像里编译一次，保证 vermagic 和结构体布局
+# 来自正确的内核树。镜像可以用仓库变量覆盖：
+#   DDK_IMAGE / DDK_RELEASE
+#
+# 这个仓库不附带镜像。任何能编 GKI 模块的 arm64 容器镜像都可以，
+# 只要镜像里带 llvm 工具链（见 Makefile 里的 llvm-objcopy 参数）。
+name: build-modules
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'lkm/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  modules:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android13-5.10
+          - android13-5.15
+          - android14-5.15
+          - android14-6.1
+          - android15-6.6
+          - android16-6.12
+          - android17-6.18
+
+    # Makefile 从这一行读取镜像名；换成你自己的 DDK 镜像即可。
+    # image: ghcr.io/ylarod/ddk-min:latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:latest
+      options: --privileged
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build ${{ matrix.kmi }}
+        run: |
+          cd lkm
+          make -j"$(nproc)"
+          llvm-objcopy --strip-unneeded \
+            -R .comment -R .note.gnu.build-id -R .note.gnu.property \
+            -R .note.Linux -R .note.GNU-stack \
+            -R .BTF -R .BTF.base -R .llvm_addrsig \
+            -R .hyp.text -R .hyp.bss -R .hyp.rodata -R .hyp.event_ids \
+            -R .hyp.patchable_function_entries -R .hyp.data dfroot.ko
+          mkdir -p ../app/src/main/jni/ko
+          cp dfroot.ko "../app/src/main/jni/ko/dfroot-${{ matrix.kmi }}.ko"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ko-${{ matrix.kmi }}
+          path: app/src/main/jni/ko/*.ko

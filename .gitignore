@@ -1,0 +1,40 @@
+# ---- 构建输出 ----
+build/
+out/
+app/build/
+app/.cxx/
+.gradle/
+local.properties
+*.apk
+*.aab
+
+# ---- 签名材料，绝不进仓库 ----
+keystore.jks
+*.jks
+*.keystore
+signing.properties
+
+# ---- 构建时生成，不入库 ----
+# gen_kmi_inc.py 每次构建扫描 jni/ko/ 重新生成
+app/src/main/jni/kmi_table.inc
+app/src/main/jni/kmi_blobs.inc
+# build_native.sh 编译出来的 crash_dump64 替换体
+app/src/main/jni/splicehelper
+
+# ---- 内核模块构建残留 ----
+lkm/*.o
+lkm/*.cmd
+lkm/.*.cmd
+lkm/*.mod
+lkm/*.mod.c
+lkm/*.lto.o
+lkm/modules.order
+lkm/Module.symvers
+lkm/dfroot.lds
+lkm/dfroot.ko
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store

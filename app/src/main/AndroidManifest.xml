@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="df.root">
+
+    <!--
+      The exploit needs to open vendor libraries and splice their page cache.
+      No runtime permission covers that; the whole point is that it is done
+      without any grant, so the only permissions requested are the ones the
+      UI needs to stay alive and report back.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+      specialUse, not dataSync: see the AutorunService comment — a dataSync FGS
+      cannot start from BOOT_COMPLETED on Android 14+.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      The su daemon started by bootstrap is KernelSU's own libksud.so, so the
+      app has to resolve the manager's native library dir. Without this the
+      package is invisible (Android 11 package visibility) and staging fails
+      with NameNotFoundException even though the manager is installed.
+    -->
+    <queries>
+        <package android:name="me.weishu.kernelsu" />
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:label="Vin的提权工具"
+        android:icon="@drawable/ic_launcher"
+        android:extractNativeLibs="true"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".DisclaimerActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="设置"
+            android:parentActivityName=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!--
+          Autorun worker.
+
+          A receiver only gets ~10s (PendingResult / broadcast timeout) after
+          onReceive returns, and the exploit plus the su probe take far longer
+          than that, so doing the work in the receiver meant the thread was
+          killed mid-run and nothing was ever recorded. A foreground service
+          has no such budget: it outlives the broadcast and is only stopped
+          when the run itself finishes.
+
+          specialUse, not dataSync.
+
+          dataSync is the semantically correct type — this is a bounded local
+          operation, not media playback or location tracking — but Android 14+
+          refuses to let a dataSync FGS start from BOOT_COMPLETED:
+
+            ForegroundServiceStartNotAllowedException
+            (FGS type dataSync not allowed to start from BOOT_COMPLETED!)
+
+          That is a platform rule, not a device quirk, so the boot path can
+          never work with dataSync. shortService is allowed from boot but is
+          capped at about three minutes, and an exploit run that exceeds the cap
+          is killed mid-flight — precisely the failure this service exists to
+          avoid. specialUse has no such cap and is permitted from boot; the
+          property below is required for it on Android 14+.
+        -->
+        <service
+            android:name=".AutorunService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="boot-time kernel privilege probe; runs once per reboot and stops itself" />
+        </service>
+
+        <!--
+          Autorun after a reboot.
+
+          enabled="true" here matters: a receiver that is disabled in the
+          manifest does not receive broadcasts even after
+          setComponentEnabledSetting() flips it back on, because the package
+          manager only re-evaluates the component at the next package scan in
+          some ROMs. Keeping it enabled in the manifest and gating on the
+          preference inside onReceive avoids that failure mode entirely — the
+          receiver always runs, and simply returns unless the user opted in.
+        -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:directBootAware="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+
+    </application>
+</manifest>
