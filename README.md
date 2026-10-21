@@ -13,19 +13,31 @@
 
 ## 它做了什么
 
+利用的是 **CVE-2026-43284（DirtyFrag）**：Android 内核会把 AES-CBC 的 ESP 包直接解密进
+`splice()` 打开的文件的页面缓存。通过构造
+
+```
+IV = AES_ECB_DEC(key, current_content) XOR desired_content
+```
+
+就能在**没有写权限、也不触发 copy-on-write** 的情况下改写任何一个 16 字节对齐的块。
+注意这条链**不依赖 user namespace**（内核 `CONFIG_USER_NS` 未打开也能用）。
+
 ```
 App 进程
   └─ 执行 native 程序 libdfroot.so
        ├─ 读 uname()，解析出 GKI KMI，选出对应的内嵌 .ko
-       ├─ 用 Dirty Pipe 在页面缓存里改写 crash_dump64
-       ├─ 把选中的 .ko 写进 vendor 分区一个现有 .so 的页面缓存
-       ├─ 把 shellcode 写进 libc++.so 里 sentry 构造函数的原位
-       └─ 触发 sentry
-            └─ shellcode 在 init 上下文里执行
-                 └─ 以 vendor_modprobe 身份 insmod 那个被改写的 .so
+       ├─ 建 IpSec transform（UdpEncapsulationSocket + SPI + AES-CBC/HMAC-SHA256）
+       ├─ 用上面的 CBC 原语在页面缓存里改写 crash_dump64 为 splicehelper
+       ├─ 借 crash_dump 域作跳板，把选中的 .ko 写进 vendor_file 标签的库
+       ├─ 把 shellcode 写进 libc++.so 里 std::ostream::sentry::sentry() 的原位
+       └─ 下一次特权调用触发 shellcode（init 上下文，uid=0，tid=1）
+            └─ /proc/self/attr/exec = u:r:vendor_modprobe:s0
+                 └─ execve("/vendor/bin/insmod", ko_target)
                       └─ 内核模块 dfroot.ko
                            ├─ 清 crash_dump64 页缓存
                            ├─ selinux_state = permissive
+                           ├─ DEFEX 存在时用 kprobe 绕过
                            └─ call_usermodehelper → bootstrap
                                 └─ ksud late-load
                                      └─ su 守护进程上线
@@ -78,7 +90,7 @@ app/src/main/jni/
   bootstrap.c           模块加载后在 init 上下文里启动 ksud
   splicehelper.c        被换成 crash_dump64 的静态小程序
   elf_parser.c          定位 libc++.so 里的 sentry 构造函数
-  aes256.h              AES-256，用于构造 Dirty Pipe 的 IV
+  aes256.h              AES-256，用于构造 ESP 包写入所需的 IV
   ko/                   每个 KMI 一个编译好的 .ko
   t_ko_select.c         选择逻辑的单元测试
 
@@ -254,6 +266,8 @@ BOOT_COMPLETED → AutorunService（前台服务）
 - **可能卡死。** 失败有时表现为内核卡死（黑屏 / 无响应），长按电源键强制重启即可恢复。
   这一版不动任何分区、不刷 boot、不格式化数据，所以不会造成系统损坏或数据丢失。
 - **可能丢数据。** 写的是页面缓存，掉电时落盘状态不确定。
+- **root 是临时的。** 模块、`su`、已加载的模块在重启后全部消失，设备回到干净的无 root 状态——
+  这同时也是跑坏之后的恢复手段。
 - **不对所有机型成立。** vendor 候选路径、shellcode 偏移、sentry 定位都依赖具体环境，
   换机型很可能需要调整。
 
@@ -272,15 +286,24 @@ BOOT_COMPLETED → AutorunService（前台服务）
 
 ## 致谢与来源
 
-本工程的部分内容来自下面这些项目，感谢原作者：
+本工程的利用链不是从零写的，它属于同一个谱系。感谢原作者的开放：
 
-- **[mitschud/DirtyFrag](https://github.com/mitschud/DirtyFrag)** — 本工具的部分实现思路与
-  代码参考了该项目。如果原作者对这里的引用方式或使用有任何异议，请通过下方
-  Issues 联系，收到后会立即删除相关内容。
-- **[Odzhan 的 shellcode 工具集](https://github.com/odzhan/shellcode)** — `jni/include.inc`
-  里的常量表（BSD 3-clause）。
-- **[KernelSU](https://github.com/tiann/KernelSU)** — bootstrap 拉起的是 KernelSU 的
-  `ksud late-load`，KernelSU 本身是 GPL-3.0，**不随本仓库分发**，需要用户自行安装。
+- **[diabl0w/DFRoot](https://github.com/diabl0w/DFRoot)** — **本工程的直接上游**。ESP 页面缓存写入、
+  crash_dump64 桥接、`libc++.so` sentry 劫持、`dfroot.ko` + bootstrap + SU 管理器中立这一整套
+  链条都来自这里。
+- **[mitschud/DirtyFrag](https://github.com/mitschud/DirtyFrag)** — DFRoot 的 Samsung 硬化分支
+  （OneUI / RKP / KDP），本工程的部分实现思路与代码参考了该项目。如果原作者对这里的引用方式
+  或使用有任何异议，请通过 Issues 联系，收到后会立即删除相关内容。
+- **[lsposed/lspromise](https://github.com/lsposed/lspromise)** — 原始 PoC 与部分代码。
+- **[polygraphene/DFReroot](https://github.com/polygraphene/DFReroot)** — SELinux permissive 内核模块。
+- **[combeng6th/DirtyInit](https://github.com/combeng6th/DirtyInit)** — 非特权 XFRM socket 的做法。
+- **[Odzhan 的 shellcode 工具集](https://github.com/odzhan/shellcode)** — `jni/include.inc` 里的常量表
+  （BSD 3-clause）。
+- **[KernelSU](https://github.com/tiann/KernelSU)** — bootstrap 拉起的是 KernelSU 的 `ksud late-load`，
+  KernelSU 本身是 GPL-3.0，**不随本仓库分发**，需要用户自行安装。
+
+本仓库相对上游的改动，主要是把「一个版本一个包」变成「一个包含 8 个 KMI、运行时自动选择」，
+以及把开机自启动这条路径在 Android 14+ 上真正跑通（见下文「实现上的几个坑」）。
 
 ---
 
