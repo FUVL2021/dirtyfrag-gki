@@ -228,36 +228,6 @@ BOOT_COMPLETED → AutorunService（前台服务）
 
 ---
 
-## 实现上的几个坑（值得知道）
-
-这些都是踩过之后写进注释的：
-
-**为什么开机自启动用 `specialUse` 而不是 `dataSync`。** `dataSync` 语义上最贴切
-（一次有限时长的本地操作），但 Android 14+ 明确禁止 `dataSync` 类型的前台服务从
-`BOOT_COMPLETED` 启动，会抛 `ForegroundServiceStartNotAllowedException`。`shortService`
-允许从开机启动但有约三分钟上限，exploit 跑到一半就会被杀——正是这个服务想避免的情况。
-`specialUse` 没有时长限制且允许开机启动。
-
-**为什么自启动不能先检测 su。** 重启后没有 root 才正是这个功能存在的理由。早期版本
-在开机时先 `suAvailable()` 再决定跑不跑，等于「先有 root 才能自启动」，必然全部跳过。
-现在直接执行 exploit，跑完之后才等 su。
-
-**为什么清理放在 exploit 跑完之后。** 开机那一刻没有 root，`detectResidue()` 只能返回
-`UNKNOWN`，那次检测纯属浪费。正确顺序是跑完 → 等 su → 清理。
-
-**为什么 receiver 在 manifest 里是 `enabled="true"`。** 有些 ROM 的包管理器只在下次
-包扫描时才重新评估组件状态，manifest 里 disabled 的 receiver 即使运行时
-`setComponentEnabledSetting()` 打开也收不到广播。保持启用、在 `onReceive` 里看偏好
-决定是否执行，可以完全绕开这个问题。
-
-**为什么「exploit 返回 0」不等于「已经有 su」。** 模块加载和 SELinux 下降在同一次
-运行内完成，但响应 su 的守护进程是异步起来的，冷启动时这个间隙最大。所以要轮询。
-
-**为什么 `/system/bin/su` 在重启后消失。** `/system` 是只读的 erofs，su 是 KernelSU
-运行时挂上去的，重启即失效。看到它存在不代表开机那一刻也有。
-
----
-
 ## 风险
 
 这是内核级提权工具，下面这些是真的会发生：
