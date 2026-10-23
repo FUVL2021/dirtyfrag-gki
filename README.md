@@ -63,7 +63,7 @@ App 进程
 前提条件：
 
 - **GKI 内核**（`uname -r` 里带 `androidNN` 标记）。非 GKI 内核没有这个标记，工具会直接判定不支持并退出。
-- 设备上**已安装 KernelSU 管理器**。bootstrap 会去管理器包里取 `libksud.so` 作为 su 守护进程；没有就只关 SELinux，不会给你 su。
+- 设备上**已安装 su 管理器**：KernelSU / SukiSU Ultra / ReSukiSU 任一。bootstrap 会去管理器包里取 `libksud.so` 作为 su 守护进程；没装就只关 SELinux，不会给你 su。
 - vendor 分区上存在下列任一文件（写模块用）：
   - `/vendor/lib64/libbinderdebug.so`
   - `/vendor/lib64/libstagefrighthw.so`
@@ -210,22 +210,16 @@ BOOT_COMPLETED → AutorunService（前台服务）
 刷同一段坏代码。想重新开启，用设置页的「重置自启动锁定」。
 
 ### 日志
-
-开机链路的每一步都写进 `/data/data/df.root/files/boot.log`（应用私有目录，重启不丢），
-包括被忽略的广播、`startForeground` 的异常、exploit 的每一行输出。主界面和设置页都能
-查看、复制、清空。这个文件是排查「开机没反应」的唯一可靠依据——logcat 在开机早期
-经常拿不到。
-
+执行链路的每一步都写进 `/data/data/df.root/files/boot.log`（应用私有目录，重启不丢），
+包括触发来源与调用栈、被忽略的广播、exploit 的每一行输出。设置页开「开发者模式」后
+可以查看、复制、清空。这个文件是排查「开机没反应」「它自己执行了」的唯一可靠依据——
+logcat 在开机早期经常拿不到。
 ### 清理
-
 执行过一次之后，清理按钮才会变可用。它会做三件事：
-
 - `rmmod dfroot` 卸载模块
-- 删掉 `/dev/dfm*`、`/dev/dfme*`、`/dev/dfmw*` 标记
+- 删掉 `/dev/df*` 全部标记
 - `setenforce 1` 恢复 SELinux
-
-清理走 `su`，所以需要 KernelSU 已授权本应用。
-
+清理走 `su`，所以需要在 su 管理器里已授权本应用。
 ---
 
 ## 风险
@@ -253,6 +247,26 @@ BOOT_COMPLETED → AutorunService（前台服务）
 
 ---
 
+## 版本更新日志
+
+### v3.0
+
+**新增**
+- 支持多 su 管理器：KernelSU / SukiSU Ultra / ReSukiSU，运行时检测。
+  检测到多个时由用户选择，选择结果记住，下次沿用。
+- 新增运行日志，记录每次执行的触发来源、调用栈和完整输出。
+- 日志入口收进设置页的「开发者模式」，默认关闭。
+
+**修复**
+- 修复应用在非开机时被触发执行的问题。
+- 修复清理后残留状态仍显示的问题。
+- 修复切换 su 管理器后旧选择仍生效的问题。
+
+### v1.5
+
+首个公开版本：8 个 GKI KMI 运行时选择 + 开机自启动。
+
+---
 ## 致谢与来源
 
 本工程的利用链不是从零写的，它属于同一个谱系。感谢原作者的开放：

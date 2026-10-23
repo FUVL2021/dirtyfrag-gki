@@ -60,6 +60,11 @@ public class AutorunService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         boolean fromBoot = intent != null && intent.getBooleanExtra(EXTRA_FROM_BOOT, false);
+        // Who asked for this service, and from where. Recorded before any
+        // decision so a stray start shows up in the log even when it is
+        // rejected below.
+        BootLog.origin(this, "AutorunService.onStartCommand(fromBoot=" + fromBoot
+                + ", startId=" + startId + ")");
         if (!fromBoot) {
             // Only the boot receiver starts this; anything else is a stray.
             BootLog.w(this, "service: started without from_boot, ignoring");
@@ -143,6 +148,20 @@ public class AutorunService extends Service {
                         BootLog.i(this, "worker: invoking exploit binary");
                         int rc = ExploitRunner.run(this, line -> BootLog.i(this, "exp| " + line));
                         BootLog.i(this, "worker: exploit returned rc=" + rc);
+
+                        // Resolution failures are not exploit failures and must
+                        // not be retried or treated as evidence of a broken
+                        // device: they mean the user has to make a choice, which
+                        // a boot-time service cannot ask for. Reported with their
+                        // own prefix so the UI can say "open the app and pick".
+                        if (rc == ExploitRunner.RC_NEED_CHOICE) {
+                            result = "skipped: need choice";
+                            BootLog.i(this, "worker: several su managers, none chosen;"
+                                    + " user has to pick in the app");
+                        } else if (rc == ExploitRunner.RC_NO_MANAGER) {
+                            result = "skipped: no su manager";
+                            BootLog.i(this, "worker: no su manager installed");
+                        } else {
                         ok = rc == 0;
 
                         // One retry, on the theory that a failed run which did
@@ -172,6 +191,7 @@ public class AutorunService extends Service {
                             BootReceiver.setRetryOnceLeft(this, true);
                         }
                         result = ok ? "ok" : "failed: rc=" + rc;
+                        }
                     }
                 }
             } catch (Throwable t) {
@@ -202,7 +222,7 @@ public class AutorunService extends Service {
                 if (r != ExploitRunner.Residue.CLEAN
                         && r != ExploitRunner.Residue.UNKNOWN) {
                     BootLog.i(this, "worker: cleaning residue");
-                    ExploitRunner.cleanupWith(line -> BootLog.i(this, "clean| " + line));
+                    ExploitRunner.cleanupWith(this, line -> BootLog.i(this, "clean| " + line));
                     BootLog.i(this, "worker: residue after cleanup: "
                             + ExploitRunner.describe(ExploitRunner.detectResidue()));
                 }

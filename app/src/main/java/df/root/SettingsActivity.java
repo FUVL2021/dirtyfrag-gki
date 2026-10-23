@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -27,6 +28,10 @@ public class SettingsActivity extends Activity {
     private Switch autorun;
     private boolean restoring;
 
+    /** The "接管 root" row; the value half is replaced, not re-created. */
+    private LinearLayout suManagerValue;
+    private TextView suManagerHint;
+
     /** For the occasional disk read that must not touch the UI thread. */
     private final java.util.concurrent.ExecutorService io =
             java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -35,6 +40,15 @@ public class SettingsActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildUi());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Managers can be installed or uninstalled while this screen is in the
+        // background — the whole reason the user opened it may have been to
+        // install one. Re-read rather than trust the state from onCreate.
+        refreshSuManager();
     }
 
     @Override
@@ -121,6 +135,26 @@ public class SettingsActivity extends Activity {
         root.addView(list, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        root.addView(sectionLabel("su 管理器"));
+
+        // Stated as fact, not as a guess: `value` is empty until the user picks,
+        // and refreshSuManager() is what fills it in.
+        suManagerValue = keyValue("接管 root", SuManager.describe(this));
+        root.addView(suManagerValue);
+
+        suManagerHint = new TextView(this);
+        suManagerHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        suManagerHint.setTextColor(Color.parseColor("#777777"));
+        suManagerHint.setPadding(0, dp(2), 0, dp(8));
+        root.addView(suManagerHint);
+
+        Button pick = new Button(this);
+        pick.setText("选择 su 管理器");
+        pick.setOnClickListener(v -> pickSuManager());
+        root.addView(pick);
+
+        refreshSuManager();
+
         root.addView(sectionLabel("开机自启动"));
 
         autorun = new Switch(this);
@@ -140,18 +174,41 @@ public class SettingsActivity extends Activity {
                 + "确认设备正常后可以在这里重新打开。");
         root.addView(warn);
 
+        root.addView(sectionLabel("维护"));
+
         Button reset = new Button(this);
         reset.setText("重置自启动锁定");
         reset.setOnClickListener(v -> confirmReset());
         root.addView(reset);
 
-        // Diagnostics live here rather than on the main screen: the main screen
-        // is for "run it", and this is the screen someone opens afterwards when
-        // a boot run did something they did not expect.
-        root.addView(sectionLabel("维护"));
+        // Diagnostics are behind a switch: a normal user never needs them, and
+        // this is the screen someone opens afterwards when a boot run did
+        // something they did not expect.
+        root.addView(sectionLabel("开发者"));
+
+        // The switch itself. Off by default, and the only way to reach the log.
+        CheckBox devSwitch = new CheckBox(this);
+        devSwitch.setText("开发者模式");
+        devSwitch.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        devSwitch.setChecked(DevOptions.enabled(this));
+        root.addView(devSwitch);
+
+        // Everything the switch controls, in one container: hiding five views
+        // one by one is how one of them ends up visible on a release build.
+        LinearLayout devPanel = new LinearLayout(this);
+        devPanel.setOrientation(LinearLayout.VERTICAL);
+        devPanel.setVisibility(devSwitch.isChecked() ? ViewGroup.VISIBLE : ViewGroup.GONE);
+
+        TextView devHint = new TextView(this);
+        devHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        devHint.setTextColor(Color.parseColor("#999999"));
+        devHint.setPadding(0, 0, 0, dp(8));
+        devHint.setText("运行日志记录了每一次执行的触发来源、调用栈和 exploit 的每一行输出。"
+                + "排查「它自己执行了」「清理不干净」这类问题时需要它，日常使用用不到。");
+        devPanel.addView(devHint);
 
         Button viewLog = new Button(this);
-        viewLog.setText("查看开机日志");
+        viewLog.setText("查看运行日志");
         viewLog.setOnClickListener(v -> {
             // Off the UI thread: this is the screen someone reaches when a run
             // already went wrong, and a stalled read there reads as a second
@@ -161,20 +218,27 @@ public class SettingsActivity extends Activity {
                 runOnUiThread(() -> BootLogViewer.show(this, body));
             });
         });
-        root.addView(viewLog);
+        devPanel.addView(viewLog);
 
         Button clearLog = new Button(this);
         clearLog.setText("清空日志");
         clearLog.setOnClickListener(v -> confirmClearLog());
-        root.addView(clearLog);
+        devPanel.addView(clearLog);
 
         TextView logHint = new TextView(this);
         logHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         logHint.setTextColor(Color.parseColor("#999999"));
         logHint.setPadding(0, dp(4), 0, dp(12));
-        logHint.setText("日志从开机自启动开始记录，包含每一步和 exploit 的每一行输出，"
-                + "保存在应用私有目录，重启后仍然保留。");
-        root.addView(logHint);
+        logHint.setText("日志保存在应用私有目录，重启后仍然保留。\n路径："
+                + BootLog.file(this));
+        devPanel.addView(logHint);
+
+        root.addView(devPanel);
+
+        devSwitch.setOnCheckedChangeListener((b, checked) -> {
+            DevOptions.setEnabled(this, checked);
+            devPanel.setVisibility(checked ? ViewGroup.VISIBLE : ViewGroup.GONE);
+        });
 
         restoreAutorun();
         return screen;
@@ -197,6 +261,92 @@ public class SettingsActivity extends Activity {
                             .makeText(this, "日志已清空", android.widget.Toast.LENGTH_SHORT))
                             .show();
                 })
+                .show();
+    }
+
+    // ------------------------------------------------------------------
+    // su manager
+    // ------------------------------------------------------------------
+
+    /**
+     * Re-read the manager state and rewrite the row.
+     *
+     * <p>Also called after a pick: choosing a manager has to be visible
+     * immediately, otherwise the button looks like it did nothing.
+     */
+    private void refreshSuManager() {
+        if (suManagerValue == null) {
+            return;
+        }
+        java.util.List<SuManager.Impl> have = SuManager.installed(this);
+        SuManager.Impl c = SuManager.chosen(this);
+
+        // The value is the last child of the row; replacing it keeps the label
+        // column width stable instead of re-laying out the whole row.
+        android.view.View last = suManagerValue.getChildAt(suManagerValue.getChildCount() - 1);
+        if (last instanceof TextView) {
+            ((TextView) last).setText(SuManager.describe(this));
+            ((TextView) last).setTextColor(c != null
+                    ? Color.parseColor("#1B5E20")
+                    : (have.isEmpty() ? Color.parseColor("#C62828") : Color.parseColor("#B26A00")));
+        }
+
+        if (have.isEmpty()) {
+            suManagerHint.setText("未安装任何受支持的 su 管理器。执行前需要先装一个："
+                    + "KernelSU、SukiSU Ultra、ReSukiSU。"
+                    + "\n若确认已安装仍显示这一行，是系统限制了本应用读取应用列表，"
+                    + "请在系统设置里允许「获取应用列表」权限。");
+        } else if (have.size() == 1) {
+            suManagerHint.setText("只检测到一个，执行时会直接使用它，不需要选择。");
+        } else if (c != null) {
+            suManagerHint.setText("同时装了 " + have.size() + " 个。当前由 "
+                    + c.label + " 接管，点下面的按钮可以换成另一个。");
+        } else {
+            suManagerHint.setText("同时装了 " + have.size() + " 个，还没选过。"
+                    + "执行时会询问你要哪个接管。");
+        }
+    }
+
+    /**
+     * Pick a manager by hand, whatever the current state.
+     *
+     * <p>Offered even when only one is installed: the row above already says
+     * which one will be used, and hiding the button in that case would make it
+     * appear and disappear depending on what is installed, which is harder to
+     * reason about than a button that is always there and sometimes has a
+     * single option.
+     */
+    private void pickSuManager() {
+        final java.util.List<SuManager.Impl> have = SuManager.installed(this);
+        if (have.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("未安装 su 管理器")
+                    .setMessage("请先安装 KernelSU、SukiSU Ultra 或 ReSukiSU 中的任一个，"
+                            + "再回来选择。")
+                    .setPositiveButton("知道了", null)
+                    .show();
+            return;
+        }
+        final SuManager.Impl[] items = have.toArray(new SuManager.Impl[0]);
+        CharSequence[] labels = new CharSequence[items.length];
+        for (int i = 0; i < items.length; i++) {
+            labels[i] = items[i].label;
+        }
+        SuManager.Impl cur = SuManager.chosen(this);
+        int checked = 0;
+        for (int i = 0; i < items.length; i++) {
+            if (items[i] == cur) {
+                checked = i;
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("选择 su 管理器")
+                .setSingleChoiceItems(labels, checked, (d, which) -> {
+                    SuManager.remember(this, items[which]);
+                    refreshSuManager();
+                    d.dismiss();
+                })
+                .setNegativeButton("取消", null)
                 .show();
     }
 

@@ -1,6 +1,7 @@
 package df.root;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -310,6 +311,14 @@ public class MainActivity extends Activity {
         if (r.equals("skipped: autorun off")) {
             return "上次开机自启动被跳过：自启动已关闭。";
         }
+        if (r.equals("skipped: need choice")) {
+            return "上次开机自启动被跳过：同时装了多个 su 管理器，还没选过要哪个接管。"
+                    + "打开本应用执行一次并选好，之后开机就会自动用这个选择。";
+        }
+        if (r.equals("skipped: no su manager")) {
+            return "上次开机自启动被跳过：没有检测到 su 管理器"
+                    + "（KernelSU / SukiSU / ReSukiSU）。安装后即可。";
+        }
         if (r.startsWith("failed: service start")) {
             return "上次开机自启动失败：系统拒绝启动后台服务。"
                     + "请在系统设置里允许本应用显示通知后重试。";
@@ -325,6 +334,7 @@ public class MainActivity extends Activity {
         // The full release string is build metadata; only the head and the
         // android tag affect the decision. The run log carries the whole thing.
         String text = "模块     " + info.describe() + "\n"
+                + "接管     " + SuManager.describe(this) + "\n"
                 + "版本     " + BuildInfo.summary(this);
         kernelView.setText(text);
         if (info.unsupported) {
@@ -401,8 +411,13 @@ public class MainActivity extends Activity {
             return;
         }
         sweptThisProcess = true;
+        // Logged because "it ran when I opened the app" has to be attributable:
+        // this sweep is the only thing the main screen does without a tap, and
+        // it must be possible to tell it apart from a real exploit run.
+        BootLog.i(this, "sweep: checking residue on open");
 
         ExploitRunner.Residue r = ExploitRunner.detectResidue();
+        BootLog.i(this, "sweep: residue=" + r + " (" + ExploitRunner.describe(r) + ")");
         if (r == ExploitRunner.Residue.CLEAN) {
             appendLog("残留检测：" + ExploitRunner.describe(r));
             return;
@@ -433,7 +448,12 @@ public class MainActivity extends Activity {
         appendLog("清理中…");
 
         worker.execute(() -> {
-            ExploitRunner.cleanupWith(line -> runOnUiThread(() -> appendLog(line)));
+            ExploitRunner.cleanupWith(this, line -> {
+                // Same file as the run, so a cleanup that appeared to do nothing
+                // can be checked against what actually happened.
+                BootLog.i(this, "clean| " + line);
+                runOnUiThread(() -> appendLog(line));
+            });
             runOnUiThread(() -> {
                 running = false;
                 runButton.setEnabled(true);
@@ -453,6 +473,94 @@ public class MainActivity extends Activity {
         if (running) {
             return;
         }
+        // Resolve the manager before anything else: the picker needs the UI
+        // thread and a decision from the user, and the run must not start until
+        // it has one. Asking here rather than relying on run()'s refusal keeps
+        // the picker in front of the user instead of behind a log line.
+        SuManager.Impl manager = SuManager.chosen(this);
+        if (manager == null) {
+            java.util.List<SuManager.Impl> have = SuManager.installed(this);
+            if (have.isEmpty()) {
+                new AlertDialog.Builder(this)
+                        .setTitle("未检测到 su 管理器")
+                        .setMessage("本工具需要把 root 交给一个 su 管理器来接管。"
+                                + "请先安装以下任一个后再执行：\n\n"
+                                + "· KernelSU\n· SukiSU Ultra\n· ReSukiSU\n\n"
+                                + "如果确认已经安装却仍然显示这里，说明系统限制了本应用"
+                                + "读取应用列表。请在系统设置里找到本应用，"
+                                + "允许「获取应用列表 / 读取已安装应用」权限后重试。")
+                        .setPositiveButton("知道了", null)
+                        .show();
+                return;
+            }
+            if (have.size() > 1) {
+                promptForManager(have);
+                return;
+            }
+            // Exactly one: no question worth asking.
+            manager = have.get(0);
+        }
+        beginRun(manager);
+    }
+
+    /**
+     * Ask which manager should take over, when more than one is installed.
+     *
+     * <p>Two or more installed is a real case, not a defensive branch: the
+     * three managers coexist happily and a user may keep both a stable and a
+     * fork build. They are indistinguishable at the binary level (each ships
+     * {@code libksud.so}) but not in behaviour — whichever one runs starts its
+     * own daemon and shows its own grant prompt — so the choice has to be the
+     * user's.
+     *
+     * <p>Only installed ones are offered. Offering an absent manager would
+     * produce a run that fails at staging for a reason the user already knows.
+     */
+    private void promptForManager(java.util.List<SuManager.Impl> available) {
+        final SuManager.Impl[] items = available.toArray(new SuManager.Impl[0]);
+        CharSequence[] labels = new CharSequence[items.length];
+        for (int i = 0; i < items.length; i++) {
+            labels[i] = items[i].label;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("选择 su 管理器")
+                .setMessage("检测到 " + items.length + " 个 su 管理器。"
+                        + "它们都会提供 su，但接管 root 的是你选的那一个"
+                        + "（授权弹窗也由它显示）。选择会被记住，之后不再询问。")
+                .setItems(labels, (d, which) -> {
+                    SuManager.remember(this, items[which]);
+                    beginRun(items[which]);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** The run itself, with the manager already decided. */
+    private void beginRun(SuManager.Impl manager) {
+        BootLog.origin(this, "MainActivity.beginRun(" + manager + ")");
+        // A manual tap does not bypass the one-run-per-boot rule when the boot
+        // autorun already ran or is about to: two runs against the same kernel
+        // is what produced the half-patched state (libc++ hooked, module gone)
+        // the old build kept getting stuck in. Running twice is only allowed
+        // after an explicit confirmation, and it is not the default.
+        if (BootReceiver.alreadyRanThisBoot(this)) {
+            new AlertDialog.Builder(this)
+                    .setTitle("本次开机已经执行过")
+                    .setMessage("同一次开机内重复执行会让内核处于半打补丁状态"
+                            + "（libc++ 已挂钩但模块已卸载），这是之前残留清理不掉的直接原因。\n\n"
+                            + "通常不需要再执行：重启一次即可重新开始。\n"
+                            + "确实要冒险再跑一次的，可以点「强制再执行」。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("强制再执行", (d, w) -> reallyBeginRun(manager))
+                    .show();
+            return;
+        }
+        BootReceiver.claimThisBoot(this);
+        reallyBeginRun(manager);
+    }
+
+    /** Actually start the run. Only reached after the boot guard passed. */
+    private void reallyBeginRun(SuManager.Impl manager) {
         running = true;
         runButton.setEnabled(false);
         logView.setText("");
@@ -463,13 +571,14 @@ public class MainActivity extends Activity {
         // Manual runs land in the same file as boot runs, tagged, so one log
         // covers both and the two can never be confused afterwards.
         BootLog.sessionStart(this, "manual run from UI");
+        BootLog.i(this, "manual: su manager " + manager.pkg);
         BootLog.i(this, "manual: invoking exploit binary");
 
         worker.execute(() -> {
             int rc = ExploitRunner.run(this, line -> {
                 BootLog.i(this, "exp| " + line);
                 runOnUiThread(() -> appendLog(line));
-            });
+            }, manager);
             BootLog.i(this, "manual: exploit returned rc=" + rc);
             int finalRc = rc;
             runOnUiThread(() -> {
