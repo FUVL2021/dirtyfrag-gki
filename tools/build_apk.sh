@@ -111,8 +111,8 @@ $AAPT2 link -o "$WORK/base.apk" \
     "${RES_ARGS[@]}" \
     --min-sdk-version 31 \
     --target-sdk-version 35 \
-    --version-code "${VERSION_CODE:-1}" \
-    --version-name "${VERSION_NAME:-1.0}"
+    --version-code "${VERSION_CODE:-37}" \
+    --version-name "${VERSION_NAME:-3.7}"
 
 # ---------------------------------------------------------------------------
 say "package"

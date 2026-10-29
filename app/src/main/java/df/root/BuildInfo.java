@@ -43,7 +43,7 @@ public final class BuildInfo {
         }
     }
 
-    /** One line: {@code v1.0 (1) · arm64-v8a · sdk 34}. */
+    /** One line: {@code v3.7 (37) · arm64-v8a · sdk 34}. */
     public static String summary(Context ctx) {
         return "v" + versionName(ctx)
                 + " (" + versionCode(ctx) + ")"
