@@ -26,16 +26,21 @@ import java.util.Locale;
  * warning — the whole point of this log is to diagnose exactly that — so
  * buffering would lose the very lines that matter.
  *
- * <p>Deliberately no synchronisation: writes come from the receiver, the
- * service worker and the UI thread, append-only, and a torn line is harmless.
+ * <p>Writes are serialised on {@link #LOCK}. The callers are the receiver, the
+ * service worker and the UI thread, and rotation deletes the file a concurrent
+ * append may be in the middle of — so "append-only, a torn line is harmless"
+ * was only true until the first rotation. The lock covers the size check, the
+ * rotation and the append as one unit.
  */
 public final class BootLog {
-
     private static final String TAG = "DFRoot/Boot";
-
+    /** Current log name; the rotated copy keeps the ".1" suffix. */
+    private static final String NAME = "boot.log";
+    private static final String PREV_NAME = "boot.log.1";
     /** Keep the file small enough to paste into a chat in one go. */
     private static final long MAX_BYTES = 256 * 1024;
-    private static final String NAME = "boot.log";
+    /** Serialises rotation and appends. */
+    private static final Object LOCK = new Object();
 
     private BootLog() {
     }
@@ -151,7 +156,10 @@ public final class BootLog {
 
     /** Current contents, for the in-app viewer. */
     public static String read(Context context) {
-        File f = file(context);
+        return readFile(file(context));
+    }
+
+    private static String readFile(File f) {
         if (!f.exists()) {
             return "";
         }
@@ -178,37 +186,75 @@ public final class BootLog {
             return;
         }
         File f = file(context);
+        String line;
         try {
-            if (f.length() > MAX_BYTES) {
-                // Cheap rotation: truncate in place rather than renaming, so the
-                // path the user was told to look at never changes.
-                try (FileOutputStream trunc = new FileOutputStream(f, false)) {
-                    trunc.write("--- truncated, older entries dropped ---\n".getBytes("UTF-8"));
-                }
-            }
             String stamp = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(new Date());
-            StringBuilder line = new StringBuilder();
-            line.append(stamp).append(' ').append(level).append(' ')
+            StringBuilder sb = new StringBuilder();
+            sb.append(stamp).append(' ').append(level).append(' ')
                     .append(android.os.Process.myPid()).append(' ')
                     .append(msg).append('\n');
             if (t != null) {
-                line.append("    ").append(t.getClass().getName());
+                sb.append("    ").append(t.getClass().getName());
                 if (t.getMessage() != null) {
-                    line.append(": ").append(t.getMessage());
+                    sb.append(": ").append(t.getMessage());
                 }
-                line.append('\n');
+                sb.append('\n');
                 for (StackTraceElement el : t.getStackTrace()) {
-                    line.append("      at ").append(el).append('\n');
+                    sb.append("      at ").append(el).append('\n');
                 }
             }
-            try (FileOutputStream out = new FileOutputStream(f, true)) {
-                Writer w = new OutputStreamWriter(out, "UTF-8");
-                w.write(line.toString());
-                w.flush();
-            }
-        } catch (IOException | RuntimeException ignored) {
-            // Storage full, or the directory vanished mid-write. Fall back to
-            // logcat only.
+            line = sb.toString();
+        } catch (RuntimeException e) {
+            // Formatting failed; nothing worth writing.
+            return;
         }
+        // The size check, the rotation and the append happen under one lock.
+        // Without it a rotation could delete the file between another thread's
+        // length() and its write, losing that thread's line - and the line that
+        // matters is usually the last one before a crash.
+        synchronized (LOCK) {
+            try {
+                if (f.length() > MAX_BYTES) {
+                    rotate(f);
+                }
+                try (FileOutputStream out = new FileOutputStream(f, true)) {
+                    Writer w = new OutputStreamWriter(out, "UTF-8");
+                    w.write(line);
+                    w.flush();
+                }
+            } catch (IOException | RuntimeException ignored) {
+                // Storage full, or the directory vanished mid-write. Fall back
+                // to logcat only.
+            }
+        }
+    }
+
+    /**
+     * Move the current log aside instead of truncating it in place.
+     *
+     * <p>A run that ends in a crash fills the file right up to the limit, so
+     * the entries most worth reading are the ones a truncate would delete.
+     * Keeping exactly one previous file bounds the total at twice
+     * {@link #MAX_BYTES} while guaranteeing the last overflow survives.
+     */
+    private static void rotate(File f) {
+        File prev = new File(f.getParentFile(), PREV_NAME);
+        //noinspection ResultOfMethodCallIgnored
+        prev.delete();
+        if (!f.renameTo(prev)) {
+            // Rename can fail if another process holds the file; truncating is
+            // worse than keeping the tail, but better than an unbounded log.
+            try (FileOutputStream trunc = new FileOutputStream(f, false)) {
+                trunc.write("--- truncated, older entries dropped ---\n".getBytes("UTF-8"));
+            } catch (IOException ignored) {
+                // Nothing more to do; the next write will try again.
+            }
+        }
+    }
+
+    /** The rotated previous log, for the in-app viewer. Empty when absent. */
+    public static String readPrevious(Context context) {
+        File f = new File(context.getApplicationContext().getFilesDir(), PREV_NAME);
+        return readFile(f);
     }
 }

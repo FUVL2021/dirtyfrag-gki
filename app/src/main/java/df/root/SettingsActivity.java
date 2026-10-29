@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.ViewGroup;
@@ -101,8 +102,15 @@ public class SettingsActivity extends Activity {
         card.setPadding(dp(14), dp(12), dp(14), dp(12));
         card.setBackgroundColor(Color.parseColor("#F2F2F2"));
         card.addView(keyValue("内核", shortenKernel(info.rawRelease)));
-        card.addView(keyValue("安卓版本", info.androidRelease == 0
-                ? "?" : String.valueOf(info.androidRelease)));
+        // Two different numbers that used to share one row. "安卓版本" showed
+        // the KMI tag parsed out of the kernel release string, which is the
+        // Android release the kernel was built for - on a device whose vendor
+        // shipped an old kernel with a newer system these disagree, and the
+        // settings card was reporting the wrong one under the right label.
+        card.addView(keyValue("系统版本", "Android " + Build.VERSION.RELEASE
+                + (Build.VERSION.SDK_INT >= 23 ? " (API " + Build.VERSION.SDK_INT + ")" : "")));
+        card.addView(keyValue("内核 KMI",
+                info.androidRelease == 0 ? "?" : "android" + info.androidRelease));
         card.addView(keyValue("内核版本", info.kernelMajor == 0
                 ? "?" : info.kernelMajor + "." + info.kernelMinor));
         card.addView(keyValue("模块", info.kmi));

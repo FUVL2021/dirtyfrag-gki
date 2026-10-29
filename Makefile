@@ -32,8 +32,12 @@ DDK_WF      := .github/workflows/build.yml
 DDK_IMAGE   ?= $(shell awk '/image: ghcr\.io\//{gsub(/.*image: /,"");gsub(/:.*$$/,"");print;exit}' $(DDK_WF) 2>/dev/null)
 DDK_RELEASE ?= $(shell awk '/image: ghcr\.io\/ylarod\/ddk-min:/{sub(/.*-/,"");print;exit}' $(DDK_WF) 2>/dev/null)
 
-SIGN_PASS  := df-ksu
-SIGN_ALIAS := df-ksu
+# Signing material lives outside the tree; see tools/build_apk.sh for the
+# same lookup. Override with DFROOT_SECRETS / DFROOT_KS_PASS / DFROOT_KS_ALIAS.
+DFROOT_SECRETS ?= $(HOME)/.dfroot-secrets
+SIGN_PASS  ?= $(shell cat $(DFROOT_SECRETS)/password 2>/dev/null || echo df-ksu)
+SIGN_ALIAS ?= df-ksu
+KEYSTORE   ?= $(firstword $(wildcard $(DFROOT_SECRETS)/keystore.jks keystore.jks))
 
 LKM_SRCS := lkm/dfroot.c lkm/Makefile
 LKM_KOS  := $(KMIS:%=app/src/main/jni/ko/dfroot-%.ko)
@@ -103,9 +107,10 @@ keystore.jks:
 	    -alias $(SIGN_ALIAS) -keyalg RSA -keysize 2048 -validity 10000 \
 	    -dname "CN=DFRoot"
 
-signing.properties: keystore.jks
-	printf 'KEYSTORE_FILE=../keystore.jks\nKEYSTORE_PASSWORD=%s\nKEY_ALIAS=%s\nKEY_PASSWORD=%s\n' \
-	    $(SIGN_PASS) $(SIGN_ALIAS) $(SIGN_PASS) > $@
+signing.properties: $(KEYSTORE)
+	@printf 'KEYSTORE_FILE=%s\nKEYSTORE_PASSWORD=%s\nKEY_ALIAS=%s\nKEY_PASSWORD=%s\n' \
+	    "$(abspath $(KEYSTORE))" "$(SIGN_PASS)" "$(SIGN_ALIAS)" "$(SIGN_PASS)" > $@
+	@chmod 600 $@
 
 $(APK): signing.properties $(LKM_KOS) $(APK_SRCS)
 	@printf '\n\033[1;36m══  DFRoot APK  ══\033[0m\n'

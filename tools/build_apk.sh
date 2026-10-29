@@ -27,8 +27,23 @@ APKSIGNER="${APKSIGNER:-/tmp/apksigner.jar}"
 ZIPALIGN="${ZIPALIGN:-/usr/lib/android-sdk/build-tools/debian/zipalign}"
 
 KS="$ROOT/keystore.jks"
-KS_PASS=df-ksu
-KS_ALIAS=df-ksu
+# Keystore path and password come from outside the tree. A release key on
+# shared storage with its password inlined in this script is readable by
+# anything that can read /sdcard; the values are only here as a last resort
+# for generating a throwaway debug key, never for a release build.
+KS_SECRETS="${DFROOT_SECRETS:-$HOME/.dfroot-secrets}"
+if [ -f "$KS_SECRETS/keystore.jks" ]; then
+    KS="$KS_SECRETS/keystore.jks"
+fi
+if [ -n "${DFROOT_KS_PASS:-}" ]; then
+    KS_PASS="$DFROOT_KS_PASS"
+elif [ -f "$KS_SECRETS/password" ]; then
+    KS_PASS="$(cat "$KS_SECRETS/password")"
+else
+    KS_PASS=df-ksu
+    printf '\033[1;33mwarning: using the built-in fallback keystore password; set DFROOT_KS_PASS or %s/password\033[0m\n' "$KS_SECRETS" >&2
+fi
+KS_ALIAS="${DFROOT_KS_ALIAS:-df-ksu}"
 
 say() { printf '\033[1;36m══  %s  ══\033[0m\n' "$*"; }
 die() { printf '\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -38,6 +53,17 @@ for f in "$AJ" "$R8" "$APKSIGNER"; do
 done
 [ -d "$ROOT/build/lib/arm64-v8a" ] || die "no native libs; run build_native.sh first"
 [ -f "$ROOT/build/lib/arm64-v8a/libdfroot.so" ] || die "libdfroot.so not built"
+
+# Regenerate the KMI tables and KmiModules.java from jni/ko/. The Makefile
+# does this, but this script is the path actually used to produce releases, and
+# a stale KmiModules.java means the settings screen lists the wrong modules.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$APP/src/main/jni/gen_kmi_inc.py" "$APP/src/main/jni" \
+        || die "gen_kmi_inc.py failed"
+else
+    [ -f "$APP/src/main/java/df/root/KmiModules.java" ] \
+        || die "python3 missing and KmiModules.java not generated"
+fi
 
 rm -rf "$WORK"
 mkdir -p "$WORK/classes" "$WORK/lib/arm64-v8a" "$OUT"

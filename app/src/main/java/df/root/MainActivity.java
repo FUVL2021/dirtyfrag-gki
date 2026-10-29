@@ -8,11 +8,13 @@ import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.text.method.ScrollingMovementMethod;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -43,6 +45,20 @@ public class MainActivity extends Activity {
     private TextView logView;
     private ScrollView logScroll;
 
+    /** Lines kept in the on-screen log before the oldest are dropped. */
+    private static final int LOG_MAX_LINES = 2000;
+    /** Char count below which trimming is skipped, to avoid rescanning per flush. */
+    private static final int LOG_TRIM_THRESHOLD_CHARS = 64 * 1024;
+    /** Coalescing window for incoming log lines. */
+    private static final long LOG_FLUSH_MS = 100L;
+
+    private final StringBuilder pendingLog = new StringBuilder();
+    private boolean logFlushScheduled;
+
+    /** Ignore repeat su probes within this window (see refreshSuState). */
+    private static final long SU_PROBE_DEBOUNCE_MS = 3000L;
+    private long lastSuProbeAt;
+
     /**
      * Whether the automatic residue sweep already ran in this process.
      *
@@ -70,7 +86,9 @@ public class MainActivity extends Activity {
         requestNotificationPermission();
         refreshKernelInfo();
         refreshAutorunCard();
-        refreshSuState();
+        // refreshSuState() is deliberately not called here: onResume runs
+        // immediately after onCreate on the first launch, so calling it in both
+        // places queued the same su probe twice on every cold start.
     }
 
     /**
@@ -194,7 +212,7 @@ public class MainActivity extends Activity {
         warning.setTextColor(Color.parseColor("#999999"));
         warning.setPadding(0, dp(8), 0, dp(8));
         warning.setText("失败通常表现为内核卡死（黑屏 / 无响应），长按电源键重启即可恢复。"
-                + "自启动在首次失败后会自动关闭。");
+                + "自启动会在连续失败两次后自动关闭（第一次失败会先重试一次）。");
         root.addView(warning);
 
         logView = new TextView(this);
@@ -364,17 +382,25 @@ public class MainActivity extends Activity {
         if (cleanupButton == null) {
             return;
         }
+        // onResume fires on every return to this screen, including after a
+        // dialog or a settings round trip. Probing su each time means a prompt
+        // the user did not ask for, so repeat checks inside the debounce
+        // window are skipped rather than queued.
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastSuProbeAt < SU_PROBE_DEBOUNCE_MS) {
+            return;
+        }
+        lastSuProbeAt = now;
         cleanupButton.setEnabled(false);
         suHint.setVisibility(ViewGroup.GONE);
-
         worker.execute(() -> {
             boolean ok = ExploitRunner.suAvailable();
             if (ok) {
                 // Root just became available, which is the only moment this
                 // check can run at all. Ask whether a previous run left the
                 // module loaded, /dev markers around, or SELinux permissive, and
-                // clean up without waiting to be told: those are leftovers the
-                // user has no way to notice on their own.
+                // report it without waiting to be told: the user has no other
+                // way to notice those leftovers.
                 autoSweepIfNeeded();
             }
             runOnUiThread(() -> {
@@ -382,12 +408,13 @@ public class MainActivity extends Activity {
                 if (ok) {
                     suHint.setVisibility(ViewGroup.GONE);
                 } else {
-                    // With no root there is nothing to clean up yet — the module
-                    // and the SELinux switch only exist after a run. Say that
-                    // plainly instead of asking for a permission that the
-                    // exploit itself is supposed to grant.
-                    suHint.setText("当前没有 root：不需要清理。清理只在执行过后才有意义，"
-                            + "用来卸载模块并恢复 SELinux。");
+                    // Deliberately not "there is no root, so nothing to clean".
+                    // A missing grant says this app cannot see the system state,
+                    // not that the state is good: a previous run may well have
+                    // left the module loaded. Say what is unknown, and what to
+                    // do about it.
+                    suHint.setText("未获得 root 授权，无法检测残留状态。"
+                            + "这不代表系统没有残留；如需检查，请先在 root 管理器中授予本应用权限。");
                     suHint.setVisibility(ViewGroup.VISIBLE);
                 }
             });
@@ -604,8 +631,64 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> appendLog(line));
             return;
         }
-        logView.append(line + "\n");
-        logScroll.post(() -> logScroll.fullScroll(ScrollView.FOCUS_DOWN));
+        // Buffer instead of touching the TextView per line. During a run the
+        // native binary can emit hundreds of lines; a setText/setSelection per
+        // line on the UI thread stalls the very screen the user is watching.
+        pendingLog.append(line).append('\n');
+        if (!logFlushScheduled) {
+            logFlushScheduled = true;
+            logView.postDelayed(this::flushLog, LOG_FLUSH_MS);
+        }
+    }
+
+    /**
+     * Move the buffered lines into the view, keeping it bounded.
+     *
+     * <p>The on-screen log used to grow without limit: every line was appended
+     * and the view scrolled to the bottom unconditionally. Both matter here -
+     * an unbounded TextView gets slower with each line, and the forced scroll
+     * yanks the view away from a user who scrolled up to read a failure.
+     */
+    private void flushLog() {
+        logFlushScheduled = false;
+        if (pendingLog.length() == 0) {
+            return;
+        }
+        String chunk = pendingLog.toString();
+        pendingLog.setLength(0);
+
+        boolean wasAtBottom = isLogAtBottom();
+        logView.append(chunk);
+        trimLogLines();
+        if (wasAtBottom) {
+            logScroll.post(() -> logScroll.fullScroll(ScrollView.FOCUS_DOWN));
+        }
+    }
+
+    /** Is the view already scrolled to the end? If not, leave it alone. */
+    private boolean isLogAtBottom() {
+        if (logScroll.getChildCount() == 0) {
+            return true;
+        }
+        View child = logScroll.getChildAt(0);
+        int slack = logScroll.getHeight() / 4;
+        return logScroll.getScrollY() + logScroll.getHeight() + slack >= child.getBottom();
+    }
+
+    /** Drop the oldest lines once the view exceeds {@link #LOG_MAX_LINES}. */
+    private void trimLogLines() {
+        CharSequence text = logView.getText();
+        if (text.length() < LOG_TRIM_THRESHOLD_CHARS) {
+            return;
+        }
+        String s = text.toString();
+        int lines = 0;
+        for (int i = s.length() - 1; i >= 0; i--) {
+            if (s.charAt(i) == '\n' && ++lines >= LOG_MAX_LINES) {
+                logView.setText(s.substring(i + 1));
+                return;
+            }
+        }
     }
 
     private int dp(int v) {
