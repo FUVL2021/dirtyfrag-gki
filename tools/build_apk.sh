@@ -45,8 +45,18 @@ mkdir -p "$WORK/classes" "$WORK/lib/arm64-v8a" "$OUT"
 # ---------------------------------------------------------------------------
 say "javac"
 # ---------------------------------------------------------------------------
-javac -encoding UTF-8 -source 8 -target 8 -nowarn -cp "$AJ" -d "$WORK/classes" \
-    "$APP"/src/main/java/df/root/*.java 2>&1 | grep -v 'bootstrap class path' || true
+# Compile, keeping the full log, and fail the build if javac failed.
+# The previous form was `javac ... | grep -v 'bootstrap class path' || true`,
+# which discarded the exit status twice over: the pipe reports grep's status,
+# and `|| true` swallowed even that. Compile errors then scrolled past and the
+# script carried on to package a stale or empty classes/ directory.
+JAVAC_LOG="$WORK/javac.log"
+if ! javac -encoding UTF-8 -source 8 -target 8 -nowarn -cp "$AJ" -d "$WORK/classes" \
+        "$APP"/src/main/java/df/root/*.java > "$JAVAC_LOG" 2>&1; then
+    grep -v 'bootstrap class path' "$JAVAC_LOG" >&2 || true
+    die "javac failed (full log: $JAVAC_LOG)"
+fi
+grep -v 'bootstrap class path' "$JAVAC_LOG" || true
 
 # ---------------------------------------------------------------------------
 say "d8"
