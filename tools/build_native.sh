@@ -10,7 +10,10 @@
 # container - the compiler and sysroot live in Termux's private data dir.
 set -euo pipefail
 
-ROOT="${DFROOT:-/storage/emulated/0/工作区/DFRoot-Clean}"
+# Root of the checkout, resolved from this script's location so the tree can
+# live anywhere. DFROOT overrides it for the case where the script is copied
+# elsewhere (it used to default to one hard-coded /sdcard path).
+ROOT="${DFROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 JNI="$ROOT/app/src/main/jni"
 OUT="$ROOT/build/lib/arm64-v8a"
 

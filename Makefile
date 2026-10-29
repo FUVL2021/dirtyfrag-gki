@@ -34,8 +34,10 @@ DDK_RELEASE ?= $(shell awk '/image: ghcr\.io\/ylarod\/ddk-min:/{sub(/.*-/,"");pr
 
 # Signing material lives outside the tree; see tools/build_apk.sh for the
 # same lookup. Override with DFROOT_SECRETS / DFROOT_KS_PASS / DFROOT_KS_ALIAS.
+# No built-in fallback password: a default in the Makefile is a default on
+# GitHub, and a release signed with it cannot be distinguished from a real one.
 DFROOT_SECRETS ?= $(HOME)/.dfroot-secrets
-SIGN_PASS  ?= $(shell cat $(DFROOT_SECRETS)/password 2>/dev/null || echo df-ksu)
+SIGN_PASS  ?= $(shell cat $(DFROOT_SECRETS)/password 2>/dev/null)
 SIGN_ALIAS ?= df-ksu
 KEYSTORE   ?= $(firstword $(wildcard $(DFROOT_SECRETS)/keystore.jks keystore.jks))
 

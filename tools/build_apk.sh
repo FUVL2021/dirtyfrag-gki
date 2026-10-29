@@ -27,10 +27,11 @@ APKSIGNER="${APKSIGNER:-/tmp/apksigner.jar}"
 ZIPALIGN="${ZIPALIGN:-/usr/lib/android-sdk/build-tools/debian/zipalign}"
 
 KS="$ROOT/keystore.jks"
-# Keystore path and password come from outside the tree. A release key on
-# shared storage with its password inlined in this script is readable by
-# anything that can read /sdcard; the values are only here as a last resort
-# for generating a throwaway debug key, never for a release build.
+# Keystore path and password come from outside the tree: a release key sitting
+# on shared storage with its password inlined in this script is readable by
+# anything that can read /sdcard. There is deliberately no built-in fallback
+# password - a silent default is how a release ends up signed with a key whose
+# passphrase is in the repo.
 KS_SECRETS="${DFROOT_SECRETS:-$HOME/.dfroot-secrets}"
 if [ -f "$KS_SECRETS/keystore.jks" ]; then
     KS="$KS_SECRETS/keystore.jks"
@@ -40,8 +41,7 @@ if [ -n "${DFROOT_KS_PASS:-}" ]; then
 elif [ -f "$KS_SECRETS/password" ]; then
     KS_PASS="$(cat "$KS_SECRETS/password")"
 else
-    KS_PASS=df-ksu
-    printf '\033[1;33mwarning: using the built-in fallback keystore password; set DFROOT_KS_PASS or %s/password\033[0m\n' "$KS_SECRETS" >&2
+    KS_PASS=""
 fi
 KS_ALIAS="${DFROOT_KS_ALIAS:-df-ksu}"
 
@@ -142,11 +142,14 @@ say "zipalign"
 # ---------------------------------------------------------------------------
 say "sign"
 # ---------------------------------------------------------------------------
+# No password means no signing. Generating a key on the fly with an empty
+# passphrase would produce an APK that cannot be installed over the previous
+# build, which looks like a broken release rather than a missing secret.
+if [ -z "$KS_PASS" ]; then
+    die "keystore password not set: export DFROOT_KS_PASS or write $KS_SECRETS/password"
+fi
 if [ ! -f "$KS" ]; then
-    keytool -genkeypair -keystore "$KS" -storetype JKS \
-        -storepass "$KS_PASS" -keypass "$KS_PASS" \
-        -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
-        -dname "CN=DFRoot"
+    die "no keystore at $KS (set DFROOT_SECRETS to the directory holding keystore.jks)"
 fi
 
 java -jar "$APKSIGNER" sign \
