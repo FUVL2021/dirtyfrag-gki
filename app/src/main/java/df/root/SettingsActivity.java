@@ -84,8 +84,14 @@ public class SettingsActivity extends Activity {
             return insets;
         });
 
-        screen.addView(root, new ScrollView.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        /* 不能传 ScrollView.LayoutParams。
+         *
+         * 它继承 FrameLayout.LayoutParams, 而 root 是 LinearLayout,
+         * 纵向测量走的是 LinearLayout.LayoutParams。类型对不上时
+         * WRAP_CONTENT 高度不参与累加, 整列按一屏算完, 超出部分既不显示
+         * 也不可滚动 —— su 管理器和开发者两个区段因此整个消失。
+         * 不传 LayoutParams, 由 ScrollView.addView 生成正确的类型。 */
+        screen.addView(root);
 
         TextView title = new TextView(this);
         title.setText("设置");
@@ -299,13 +305,28 @@ public class SettingsActivity extends Activity {
                     : (have.isEmpty() ? Color.parseColor("#C62828") : Color.parseColor("#B26A00")));
         }
 
+        if (SuManager.customChosen(this)) {
+            String p = SuManager.customPath(this);
+            suManagerHint.setText("正在使用自定义路径：\n" + (p == null ? "（未填）" : p)
+                    + "\n点下面的按钮可以改，或换回列表里的面具。");
+            return;
+        }
+
         if (have.isEmpty()) {
-            suManagerHint.setText("未安装任何受支持的 su 管理器。执行前需要先装一个："
-                    + "KernelSU、SukiSU Ultra、ReSukiSU。"
-                    + "\n若确认已安装仍显示这一行，是系统限制了本应用读取应用列表，"
-                    + "请在系统设置里允许「获取应用列表」权限。");
+            // Two different failures look identical here, so name both. Telling
+            // a user who has KernelSU installed to "install one" sends them to
+            // fix the wrong thing.
+            suManagerHint.setText("未检测到 KernelSU / SukiSU Ultra / ReSukiSU。"
+                    + "\n可能是没装，也可能是系统限制了本应用读取应用列表"
+                    + "（部分厂商 ROM 默认如此）。"
+                    + "\n点下面的按钮可以直接从这三个里选一个，"
+                    + "用别的面具（KernelSU-Next、APatch 等）则选「自定义」填路径。");
         } else if (have.size() == 1) {
-            suManagerHint.setText("只检测到一个，执行时会直接使用它，不需要选择。");
+            SuManager.Impl only = have.get(0);
+            suManagerHint.setText(only.viaOverrideOnly(this)
+                    ? "系统检测不到，当前使用手动指定的路径：\n" + only.override(this)
+                    : "只检测到一个，执行时会直接使用它，不需要选择。"
+                    + "\n用别的面具可以点下面的按钮选「自定义」。");
         } else if (c != null) {
             suManagerHint.setText("同时装了 " + have.size() + " 个。当前由 "
                     + c.label + " 接管，点下面的按钮可以换成另一个。");
@@ -316,43 +337,181 @@ public class SettingsActivity extends Activity {
     }
 
     /**
-     * Pick a manager by hand, whatever the current state.
+     * Pick a manager by hand.
      *
-     * <p>Offered even when only one is installed: the row above already says
-     * which one will be used, and hiding the button in that case would make it
-     * appear and disappear depending on what is installed, which is harder to
-     * reason about than a button that is always there and sometimes has a
-     * single option.
+     * <p>Always offers all three, detected or not. Refusing to open the picker
+     * when nothing was detected — the old behaviour — left no way forward on a
+     * ROM that hides the manager package: the app would insist nothing was
+     * installed while the user could see it in their own launcher.
+     *
+     * <p>Detected managers are listed first and marked, so the common case stays
+     * a single tap; undetected ones are still selectable and are marked as
+     * needing a path.
      */
     private void pickSuManager() {
-        final java.util.List<SuManager.Impl> have = SuManager.installed(this);
-        if (have.isEmpty()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("未安装 su 管理器")
-                    .setMessage("请先安装 KernelSU、SukiSU Ultra 或 ReSukiSU 中的任一个，"
-                            + "再回来选择。")
-                    .setPositiveButton("知道了", null)
-                    .show();
-            return;
-        }
-        final SuManager.Impl[] items = have.toArray(new SuManager.Impl[0]);
-        CharSequence[] labels = new CharSequence[items.length];
-        for (int i = 0; i < items.length; i++) {
-            labels[i] = items[i].label;
-        }
-        SuManager.Impl cur = SuManager.chosen(this);
-        int checked = 0;
-        for (int i = 0; i < items.length; i++) {
-            if (items[i] == cur) {
+        final java.util.List<SuManager.Impl> detected = SuManager.installed(this);
+        final java.util.List<SuManager.Impl> items = SuManager.all();
+
+        // Detected first, so the usual case is the first row.
+        items.sort((a, b) -> {
+            boolean da = detected.contains(a), db = detected.contains(b);
+            if (da != db) {
+                return da ? -1 : 1;
+            }
+            return a.ordinal() - b.ordinal();
+        });
+
+        final SuManager.Impl cur = SuManager.chosen(this);
+        final boolean customCur = SuManager.customChosen(this);
+
+        // The three known managers, then one extra row for anything else.
+        CharSequence[] labels = new CharSequence[items.size() + 1];
+        int checked = customCur ? items.size() : -1;
+        for (int i = 0; i < items.size(); i++) {
+            SuManager.Impl m = items.get(i);
+            // Badge says where the path will come from. "未检测到" is not a
+            // blocker any more: picking it still means "use this manager", and
+            // staging reads its built-in path.
+            StringBuilder sb = new StringBuilder(m.label);
+            if (detected.contains(m)) {
+                sb.append("（已检测到）");
+            } else if (m.override(this) != null && !m.override(this).isEmpty()) {
+                sb.append("（手动路径）");
+            } else {
+                sb.append("（未检测到）");
+            }
+            labels[i] = sb.toString();
+            if (m == cur) {
                 checked = i;
             }
         }
+        String customPath = SuManager.customPath(this);
+        labels[items.size()] = customPath == null || customPath.isEmpty()
+                ? "自定义（其他面具，填路径）"
+                : "自定义（" + customPath + "）";
+
         new AlertDialog.Builder(this)
                 .setTitle("选择 su 管理器")
                 .setSingleChoiceItems(labels, checked, (d, which) -> {
-                    SuManager.remember(this, items[which]);
-                    refreshSuManager();
                     d.dismiss();
+                    if (which == items.size()) {
+                        askCustomPath();
+                        return;
+                    }
+                    SuManager.Impl m = items.get(which);
+                    // A pick is a pick: if the manager is installed its path is
+                    // known, so honour it immediately. Only an undetected one
+                    // still needs a typed path.
+                    if (m.ksudSourceWithOverride(this) != null) {
+                        SuManager.remember(this, m);
+                        refreshSuManager();
+                    } else {
+                        askKsudPath(m);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /**
+     * Ask for the path of a manager not in {@link SuManager.Impl}.
+     *
+     * <p>Saves and selects in one step: a path with no manager behind it is
+     * only meaningful as the active choice, so there is no separate "save but
+     * do not use" state to get stuck in.
+     */
+    private void askCustomPath() {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("/data/app/~~…/…/lib/arm64/libksud.so");
+        String existing = SuManager.customPath(this);
+        if (existing != null) {
+            input.setText(existing);
+        }
+        input.setSingleLine(false);
+        input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+
+        final android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(input);
+
+        new AlertDialog.Builder(this)
+                .setTitle("自定义 su 管理器")
+                .setMessage("用于 KernelSU-Next、APatch 等不在列表里的面具。"
+                        + "填它的 ksud 可执行文件（或 libksud.so）完整路径。"
+                        + "\n\n留空则取消自定义，回到自动检测。")
+                .setView(scroll)
+                .setPositiveButton("保存", (d, w) -> {
+                    String path = input.getText().toString().trim();
+                    if (path.isEmpty()) {
+                        SuManager.setCustomPath(this, null);
+                        SuManager.forget(this);
+                    } else {
+                        SuManager.setCustomPath(this, path);
+                        SuManager.rememberCustom(this);
+                    }
+                    refreshSuManager();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** The already-chosen manager, else the only detected one, else null. */
+    private SuManager.Impl chosenOrFirst(java.util.List<SuManager.Impl> detected) {
+        SuManager.Impl c = SuManager.chosen(this);
+        if (c != null) {
+            return c;
+        }
+        return detected.size() == 1 ? detected.get(0) : null;
+    }
+
+    private void askKsudPathFor(SuManager.Impl m) {
+        if (m == null) {
+            // Nothing chosen and nothing detected: ask which manager first.
+            pickSuManager();
+            return;
+        }
+        askKsudPath(m);
+    }
+
+    /**
+     * Ask for the {@code libksud.so} path of one manager.
+     *
+     * <p>Pre-filled with the resolved path when there is one, so the dialog
+     * doubles as "show me where this lives". Validation is deliberately weak:
+     * existence only, not a binary check. The likely reason the field is being
+     * used at all is that the package manager cannot see the file, and a
+     * stricter check would reject the one path that actually works.
+     */
+    private void askKsudPath(SuManager.Impl m) {
+        java.io.File resolved = m.ksudSource(this);
+        String existing = m.override(this);
+        String initial = existing != null ? existing
+                : (resolved != null ? resolved.getAbsolutePath() : "");
+
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("/data/app/~~…/…/lib/arm64/libksud.so");
+        input.setText(initial);
+        input.setSingleLine(false);
+        input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+
+        new AlertDialog.Builder(this)
+                .setTitle("指定 " + m.label + " 的 libksud.so")
+                .setMessage("系统可能限制了本应用读取应用列表，导致检测不到。"
+                        + "如果你确认已安装 " + m.label + "，在这里填它的 libksud.so 完整路径。"
+                        + "\n\n留空则清除，恢复为自动检测。")
+                .setView(input)
+                .setPositiveButton("保存", (d, w) -> {
+                    String path = input.getText().toString().trim();
+                    if (!path.isEmpty() && !new java.io.File(path).isFile()) {
+                        // Warn but keep the value: an unreadable path is exactly
+                        // the situation this field exists for, and the file may
+                        // become readable once root is obtained.
+                        android.widget.Toast.makeText(this,
+                                "该路径当前不可读，已保存；执行时若失败请检查",
+                                android.widget.Toast.LENGTH_LONG).show();
+                    }
+                    m.setOverride(this, path);
+                    SuManager.remember(this, m);
+                    refreshSuManager();
                 })
                 .setNegativeButton("取消", null)
                 .show();

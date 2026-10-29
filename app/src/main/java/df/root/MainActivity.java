@@ -505,6 +505,13 @@ public class MainActivity extends Activity {
         // it has one. Asking here rather than relying on run()'s refusal keeps
         // the picker in front of the user instead of behind a log line.
         SuManager.Impl manager = SuManager.chosen(this);
+        // 自定义 is a complete choice on its own — a path with no manager to
+        // detect. Without this check the run would land in the "nothing
+        // installed" dialog while a perfectly usable path is configured.
+        if (manager == null && SuManager.customChosen(this)) {
+            beginRun(null);
+            return;
+        }
         if (manager == null) {
             java.util.List<SuManager.Impl> have = SuManager.installed(this);
             if (have.isEmpty()) {
@@ -514,9 +521,12 @@ public class MainActivity extends Activity {
                                 + "请先安装以下任一个后再执行：\n\n"
                                 + "· KernelSU\n· SukiSU Ultra\n· ReSukiSU\n\n"
                                 + "如果确认已经安装却仍然显示这里，说明系统限制了本应用"
-                                + "读取应用列表。请在系统设置里找到本应用，"
-                                + "允许「获取应用列表 / 读取已安装应用」权限后重试。")
-                        .setPositiveButton("知道了", null)
+                                + "读取应用列表。可以去「设置 → su 管理器」直接选一个，"
+                                + "或用「自定义」填你自己面具的 ksud 路径。")
+                        .setPositiveButton("去设置", (d, w) -> {
+                            startActivity(new android.content.Intent(this, SettingsActivity.class));
+                        })
+                        .setNegativeButton("知道了", null)
                         .show();
                 return;
             }

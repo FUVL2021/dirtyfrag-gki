@@ -67,18 +67,56 @@ public final class SuManager {
      * here and none needs updating when a manager changes its install layout.
      */
     public enum Impl {
-        KERNELSU("me.weishu.kernelsu", "KernelSU"),
-        SUKISU("com.sukisu.ultra", "SukiSU Ultra"),
-        RESUKISU("com.resukisu.resukisu", "ReSukiSU");
+        KERNELSU("me.weishu.kernelsu", "KernelSU",
+                "/data/app/~~wlfUtSA-TD3_MgXHKNNbVg==/me.weishu.kernelsu-h31qFYD5vQK60UW-52-49Q==/lib/arm64/libksud.so"),
+        SUKISU("com.sukisu.ultra", "SukiSU Ultra",
+                "/data/app/~~tB2oDs7L-eRQ278mwZWHZg==/com.sukisu.ultra-HRdOa40-w6StXip_W7AzaQ==/lib/arm64/libksud.so"),
+        /**
+         * Recorded from a device where ReSukiSU was installed; that install is
+         * gone now (its {@code ~~<random>==} dir no longer exists), so the
+         * literal is cleared rather than left as a path that resolves to
+         * nothing. Fill it back in if it is ever installed again on this
+         * device — {@code pm path com.resukisu.resukisu} gives the dir.
+         */
+        RESUKISU("com.resukisu.resukisu", "ReSukiSU", null);
+
+        /**
+         * A manager this build knows nothing about — KernelSU-Next, APatch, or
+         * anything else that ships a {@code ksud}-style daemon.
+         *
+         * <p>Not an {@link Impl} entry itself: it has no package and no baked
+         * path, so it lives outside the enum and is offered as an extra row in
+         * the picker. Its path always comes from the user, stored under the
+         * same override key scheme with a fixed pseudo-package.
+         */
+        public static final String CUSTOM_PKG = "custom";
 
         /** Manifest package of the manager app. */
         public final String pkg;
         /** Name shown in the picker and in the log. */
         public final String label;
 
-        Impl(String pkg, String label) {
+        /**
+         * Known-good {@code libksud.so} path on this device, or {@code null}.
+         *
+         * <p>Used only after the package manager has failed to answer. The
+         * {@code ~~<random>==} and {@code -<hash>==} segments are install-time
+         * salts that change on every reinstall, so this path is not portably
+         * correct — it is correct for the device it was recorded from, which is
+         * the situation this exists for: a vendor ROM hides the manager package
+         * so {@code nativeLibraryDir} can never be resolved, but the path is
+         * still right because nothing has been reinstalled since.
+         *
+         * <p>Every use is verified with {@link File#isFile()} first, so a stale
+         * entry after a reinstall degrades to "not found" instead of being
+         * copied and failing later at exec time.
+         */
+        public final String bakedPath;
+
+        Impl(String pkg, String label, String bakedPath) {
             this.pkg = pkg;
             this.label = label;
+            this.bakedPath = bakedPath;
         }
 
         /**
@@ -103,6 +141,103 @@ public final class SuManager {
         public boolean usable(Context ctx) {
             return ksudSource(ctx) != null;
         }
+
+        /**
+         * A manual override path for this manager, or {@code null}.
+         *
+         * <p>Needed because the package manager is not always answerable: some
+         * vendor ROMs answer {@code getApplicationInfo()} with
+         * NameNotFoundException for packages that are plainly installed
+         * (MIUI/HyperOS keep an app-list privacy switch, and the {@code <queries>}
+         * entries in the manifest do not override it). When that happens
+         * {@code nativeLibraryDir} is unreachable too, so the only way to stage
+         * a run is to let the user type the path they can see themselves.
+         *
+         * <p>Stored per-manager so switching between two installed managers does
+         * not carry one manager's override over to the other.
+         */
+        private String overrideKey() {
+            return "su_path_override_" + pkg;
+        }
+
+        public void setOverride(Context ctx, String path) {
+            SharedPreferences.Editor e = prefs(ctx).edit();
+            if (path == null || path.trim().isEmpty()) {
+                e.remove(overrideKey());
+            } else {
+                e.putString(overrideKey(), path.trim());
+            }
+            e.commit();
+        }
+
+        public String override(Context ctx) {
+            return prefs(ctx).getString(overrideKey(), null);
+        }
+
+        /**
+         * Where to read {@code libksud.so} from.
+         *
+         * <p>Three sources, in order:
+         *
+         * <ol>
+         *   <li>the user's manual override — an explicit instruction, so it wins
+         *       even when detection also works;</li>
+         *   <li>{@code nativeLibraryDir} from the package manager — always
+         *       correct when it works, and the only source that survives a
+         *       reinstall;</li>
+         *   <li>{@link #bakedPath} — recorded from this device. Used when the
+         *       package manager refuses to answer.</li>
+         * </ol>
+         *
+         * <p>No {@code isFile()} gate on the baked path. The app cannot read
+         * {@code /data/app} at all: every install dir is {@code system:system
+         * 0771}, so an unprivileged process cannot even stat into it. A check
+         * here therefore always fails, and the path that is actually correct
+         * would be rejected — which is exactly the bug this replaced. The copy
+         * happens at staging, after root is in hand, so readability at this
+         * point is not a useful signal.
+         *
+         * @return a path to try, or {@code null} when the manager is not
+         *         present at all.
+         */
+        public File ksudSourceWithOverride(Context ctx) {
+            String ov = override(ctx);
+            if (ov != null && !ov.isEmpty()) {
+                return new File(ov);
+            }
+            File resolved = ksudSource(ctx);
+            if (resolved != null) {
+                return resolved;
+            }
+            if (probeInstalled(ctx)) {
+                return bakedPath != null ? new File(bakedPath) : null;
+            }
+            return null;
+        }
+
+        /**
+         * True when the package manager can see this manager's APK.
+         *
+         * <p>Package visibility only — the app's own {@code <queries>} entries
+         * cover the three known managers, so this answers "is it installed"
+         * without going anywhere near {@code /data/app}.
+         */
+        public boolean probeInstalled(Context ctx) {
+            try {
+                ctx.getPackageManager().getApplicationInfo(pkg, 0);
+                return true;
+            } catch (PackageManager.NameNotFoundException e) {
+                return false;
+            }
+        }
+
+        /**
+         * True when this manager resolves only through the baked path, i.e. the
+         * package manager could not answer.
+         */
+        public boolean viaOverrideOnly(Context ctx) {
+            return ksudSource(ctx) == null && ksudSourceWithOverride(ctx) != null;
+        }
     }
 
     private SuManager() {
@@ -114,13 +249,33 @@ public final class SuManager {
      * <p>Requires the daemon binary to be present, not just the package: a
      * manager halfway through an update has an APK but no extracted library,
      * and staging would fail later with a less useful message.
+     *
+     * <p>A manual path override counts as "installed" even when the package is
+     * invisible to this app — that is the whole point of the override. Without
+     * this the picker would refuse to record a choice the user already made on
+     * a ROM that hides the manager package.
      */
     public static List<Impl> installed(Context ctx) {
         List<Impl> out = new ArrayList<>(3);
         for (Impl i : Impl.values()) {
-            if (i.usable(ctx)) {
+            if (i.ksudSourceWithOverride(ctx) != null) {
                 out.add(i);
             }
+        }
+        return out;
+    }
+
+    /**
+     * Every manager this build can drive, whether detected or not.
+     *
+     * <p>Backs the manual picker. Detecting nothing is a normal outcome on a
+     * ROM that hides the manager package, and refusing to let the user say
+     * "it is installed, use it" would leave them with no way forward.
+     */
+    public static List<Impl> all() {
+        List<Impl> out = new ArrayList<>(3);
+        for (Impl i : Impl.values()) {
+            out.add(i);
         }
         return out;
     }
@@ -135,8 +290,10 @@ public final class SuManager {
             if (i.pkg.equals(saved)) {
                 // Re-validated: a manager can be uninstalled between runs, and
                 // a stale choice has to read as "not chosen" rather than fail
-                // at staging.
-                return i.usable(ctx) ? i : null;
+                // at staging. The override counts here for the same reason it
+                // counts in installed(): on a ROM that hides the package, the
+                // override is the only evidence the manager exists at all.
+                return i.ksudSourceWithOverride(ctx) != null ? i : null;
             }
         }
         return null;
@@ -150,7 +307,49 @@ public final class SuManager {
 
     /** Forget the choice, so the next run asks again. */
     public static void forget(Context ctx) {
-        prefs(ctx).edit().remove(KEY_CHOSEN).commit();
+        prefs(ctx).edit().remove(KEY_CHOSEN).remove(customKey()).commit();
+    }
+
+    /**
+     * Path the user typed for a manager outside {@link Impl}, or {@code null}.
+     *
+     * <p>Stored separately from the per-manager overrides because there is no
+     * manager to key it by: the user is saying "use this binary" with no
+     * package attached.
+     */
+    public static String customPath(Context ctx) {
+        return prefs(ctx).getString(customKey(), null);
+    }
+
+    public static void setCustomPath(Context ctx, String path) {
+        SharedPreferences.Editor e = prefs(ctx).edit();
+        if (path == null || path.trim().isEmpty()) {
+            e.remove(customKey());
+        } else {
+            e.putString(customKey(), path.trim());
+        }
+        e.commit();
+    }
+
+    /** True when the user's saved choice is the custom entry. */
+    public static boolean customChosen(Context ctx) {
+        return Impl.CUSTOM_PKG.equals(prefs(ctx).getString(KEY_CHOSEN, null));
+    }
+
+    /** Remember the custom entry as the choice. */
+    public static void rememberCustom(Context ctx) {
+        prefs(ctx).edit().putString(KEY_CHOSEN, Impl.CUSTOM_PKG).commit();
+        Log.i(TAG, "chosen su manager: custom");
+    }
+
+    /** The custom path to stage, or {@code null} when unset. */
+    public static File customSource(Context ctx) {
+        String p = customPath(ctx);
+        return (p == null || p.isEmpty()) ? null : new File(p);
+    }
+
+    private static String customKey() {
+        return "su_path_override_" + Impl.CUSTOM_PKG;
     }
 
     /**
@@ -161,16 +360,26 @@ public final class SuManager {
      * one, or nothing at all.
      */
     public static String describe(Context ctx) {
+        if (customChosen(ctx)) {
+            String p = customPath(ctx);
+            return p != null && !p.isEmpty()
+                    ? "自定义（" + p + "）"
+                    : "自定义（未填路径）";
+        }
         List<Impl> have = installed(ctx);
         if (have.isEmpty()) {
-            return "未检测到（未安装 KernelSU / SukiSU / ReSukiSU）";
+            return "未检测到（可手动选择，或选「自定义」填路径）";
         }
         Impl c = chosen(ctx);
         if (c != null) {
-            return c.label + "（已选择）";
+            // Say when the choice does not rest on a live package-manager
+            // lookup: if a run fails later this is the first thing to check.
+            return c.label + (c.viaOverrideOnly(ctx) ? "（已选择·内置路径）" : "（已选择）");
         }
         if (have.size() == 1) {
-            return have.get(0).label + "（唯一，直接使用）";
+            Impl only = have.get(0);
+            return only.label + (only.viaOverrideOnly(ctx)
+                    ? "（唯一·内置路径）" : "（唯一，直接使用）");
         }
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < have.size(); i++) {

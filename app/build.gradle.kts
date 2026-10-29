@@ -11,13 +11,8 @@ android {
         applicationId = "df.root"
         minSdk = 31
         targetSdk = 35
-<<<<<<< HEAD
-        versionCode = 1
-        versionName = "1.0"
-=======
         versionCode = 37
         versionName = "3.7"
->>>>>>> 127589a (v3.7: bump versionCode 36->37, versionName 3.6->3.7)
 
         ndk {
             abiFilters += "arm64-v8a"
